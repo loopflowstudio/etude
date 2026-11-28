@@ -29,11 +29,12 @@ Neither designates a player as the subject: both sides contribute results, and
 your report chooses whose score to show.
 
 An `EvalJob(tournament=PANEL, play=play, agents=Agents(load=load, build=build),
-checkpoints=saved, max_hours=...)` declares the match generator and how to play.
-For a round robin, pass `enter=(a, b, c)` instead of checkpoints. Compatible jobs
-share compute automatically. The launcher prints one run address for the
-group. Its directory holds the launch declaration, writer and outcome, with
-the tournaments’ result directories beneath it. A retry can reuse their
+checkpoints=saved, max_hours=...)` declares the match generator and how to play
+(`play=` for `async def play(match, agents)`, or `play_many=` for a vectorized
+engine). For a round robin, pass `enter=(a, b, c)` instead of checkpoints.
+Compatible jobs share compute automatically. The launcher prints one run address
+for the group. Its directory holds the launch declaration, writer and outcome,
+with the tournaments’ result directories beneath it. A retry can reuse their
 sealed matches on a fresh machine. Queries and reports keep the original
 tournament and match identifiers.
 
@@ -50,19 +51,21 @@ influence it. The match key includes the seated player keys, groups, config,
 base seed and index; the total panel size does not.
 
 ```python
+from collections.abc import Sequence
 from random import Random
 
+from etude.eval.agents import Forward
 from etude.eval.records import Match
 from etude.eval.result import Tables
 
 
-def play(match: Match, agents: list[object]) -> Tables:
+async def play(match: Match, agents: Sequence[Forward]) -> Tables:
     config_random = Random(f"{match.seed}:config")
     engine_random = Random(f"{match.seed}:engine")
     player_random = [Random(f"{match.seed}:player:{i}") for i in range(len(agents))]
-    # Resolve random decks from config_random, then play using engine_random
-    # and each player's independent stream. Return your own table rows.
-    return run_game(match.config, agents, config_random, engine_random, player_random)
+    # Resolve random decks from config_random, then await agents[seat]([obs])
+    # using engine_random and each player's independent stream.
+    return await run_game(match.config, agents, config_random, engine_random, player_random)
 ```
 
 Use `Match[Rules]` to receive your Pydantic config as a typed model. Otherwise
@@ -115,93 +118,210 @@ show as coverage gaps instead of fabricated scores.
 
 ## Agents
 
-There is one game signature: `play(match, agents)`. Each seated player gets one
-author object in `agents`, in seat order.
-
-This PyTorch loader uses your experiment's `load_model` to read the checkpoint.
-
 ```python
-# models.py: keep model imports here so game processes stay light
-import torch
-
+# models.py: may import Torch and choose the model's device
 from etude.checkpoints import CheckpointRef
-from etude.eval.agents import Forward
+from etude.eval.agents import ModelForward
 
 
-def load(checkpoint: CheckpointRef) -> Forward:
-    if torch.cuda.is_available():
-        device = "cuda"
-    elif torch.backends.mps.is_available():
-        device = "mps"
-    else:
-        device = "cpu"
-    model = load_model(checkpoint.path).to(device).eval()
+def load(checkpoint: CheckpointRef) -> ModelForward:
+    model = load_weights(checkpoint.path)
 
     def forward(inputs: list[object]) -> list[object]:
-        with torch.inference_mode():
-            return model(torch.as_tensor(inputs, device=device)).tolist()
+        return model.predict(inputs)
 
     return forward
 ```
 
-- `load(checkpoint)` returns a **deterministic** callable from a list of inputs
-  to a list of outputs, preserving length and order. Load model weights from
-  `checkpoint.path`; a named-object checkpoint is a folder with `checkpoint.json`.
+```python
+# game.py: keep model libraries out of this module
+from collections.abc import Sequence
+from random import Random
+
+from etude.eval.agents import Forward
+from etude.eval.records import Match
+from etude.eval.result import Tables
+
+
+async def play(match: Match, agents: Sequence[Forward]) -> Tables:
+    rng = Random(match.seed)
+    [logits] = await agents[0]([initial_observation(match.config)])
+    action = sample(logits, rng)
+    return {"scores": [{"seat": 0, "score": score(action)}]}
+```
+
+Per-match games use `async def play(match, agents)`. Each seated player gets one
+author object in `agents`, in seat order. A synchronous `def play` is refused
+when the job is declared.
+
+- `load(checkpoint)` returns a **deterministic** `ModelForward` from a list of
+  inputs to a list of outputs, preserving length and order independently of
+  batch composition. Load model weights from `checkpoint.path`; a named-object
+  checkpoint is a folder with `checkpoint.json`.
 - `build(player, leaves)` returns what the game uses. `leaves` maps each
-  checkpoint key to its forward. It can build search, sampling or an ensemble.
-  Sampling and action choice belong in game code, seeded from `match.seed`.
-- A bare checkpoint with no build hook receives its forward directly. Code/API
-  players use `build` too; without checkpoint leaves they start no model-loading
-  process and perform no GPU probe. Your build hook owns API credentials and clients.
+  checkpoint key to its awaitable `Forward`. Within a game process, every match
+  seating a checkpoint shares that checkpoint's `Forward` object. Sampling and
+  action choice belong in game code, seeded from `match.seed`.
+- A bare checkpoint with no build hook receives its `Forward` directly. Code and
+  API players use `build` too. A `play` tournament with no checkpoint leaves
+  runs one match at a time per game process and bypasses the shared agent.
+  A group with no checkpoint leaves skips GPU detection. Your build hook
+  owns API credentials and clients.
 
 [`agent_game.py`](../examples/agent_game.py) shows `Sampled(temperature=...)`
 as identity and `Sampler.choose` as the action method.
 [`agent_models.py`](../examples/agent_models.py) shows a loader. Both are used
 by the runnable [`agents.py`](../examples/agents.py) experiment.
 
-Declare the hardware your loader can use with `Agents(load=load, devices=...)`.
-The default `("cuda", "metal")` shares inference on a visible NVIDIA GPU or an
-Apple Silicon Mac running native arm64 Python. Use `("cuda",)` for a CUDA-only
-loader or `("metal",)` for Apple GPU libraries such as PyTorch MPS and MLX.
+Each game process runs its `play` tasks on one `asyncio` event loop. Calls
+queued in the same loop turn flush together. Avoid blocking the event loop between `await`s.
 
-```text
-$ uv run etude eval experiment.py
-etude: agents: shared inference for prediction (metal); 7 games at a time; 1 inference thread
+`Agents(load=load, devices=("cuda", "metal"))` shares inference on a visible
+NVIDIA GPU or an Apple Silicon Mac running native arm64 Python. This is the
+default. Use `("cuda",)` for a CUDA-only loader, `("metal",)` for an Apple GPU
+loader, or `("cpu",)` for direct inference without a probe. Etude drops
+`"cpu"` from mixed declarations.
+
+With a matching accelerator, game processes send their pending calls in one
+message to a shared agent process, which merges ready requests by checkpoint
+up to `max_batch` rows and writes observations to `artifacts/agents/batches.json`.
+Without a matching accelerator, each game process caches its own checkpoints,
+uses one model-library thread, and gets a share of the checkpoint allowance
+(half of host memory by default). Both modes split oversized requests with one
+input per row and return one ordered reply.
+
+Pending matches, CPUs and available host memory bound the game process count.
+An async `play` panel can start a process per available game core even when
+its pending matches fit into one inference batch.
+With `play`, shared inference divides `max_batch` across game processes,
+rounding up. Direct checkpoint inference gives each process up to `max_batch`
+matches. Shared inference leaves a core for the agent process when possible.
+The startup line shows the process and thread counts, the inference mode and
+its reason, and the initial `target_matches` for each play mode.
+
+Choose tensor placement in `load` and honor Etude's thread environment there.
+Keep model imports in the loading module so shared game processes stay light.
+`devices`, `max_batch` and `memory_gb` require a checkpoint loader.
+
+## Vectorized engines
+
+Run the [vectorized example](../examples/vectorized.py) with
+`uv run etude eval examples/vectorized.py --source /tmp/vectorized`.
+
+For engines that step many games together and collate observations themselves,
+write an async generator `play_many(matches)` instead of `play(match, agents)`:
+
+```python
+from collections.abc import AsyncIterator
+
+from etude.eval.agents import ForwardError
+from etude.eval.game import MatchStream
+from etude.eval.records import Match
+from etude.eval.result import Tables
+from etude.jobs import Agents, EvalJob
+
+ENGINE_MAX_SLOTS = 128  # Size for the engine's arena memory budget.
+
+
+async def play_many(
+    matches: MatchStream[Rules],
+) -> AsyncIterator[tuple[Match[Rules], Tables | Exception]]:
+    pool = RolloutPool(slots=min(ENGINE_MAX_SLOTS, matches.target_matches))
+    while True:
+        for match, agents in await matches.take(pool.free):
+            pool.load(match, agents)
+        if not pool.active:
+            return
+        for forward, batch, rows, slots in pool.ready_batches():
+            try:
+                [outputs] = await forward([batch], rows=rows)
+            except ForwardError as error:
+                for match in pool.drop(slots):
+                    yield match, error
+                continue
+            for match, tables in pool.step(slots, outputs):
+                yield match, tables
+
+
+job = EvalJob(
+    tournament=PANEL,
+    play_many=play_many,
+    agents=Agents(load=load, max_batch=256),
+    checkpoints=saved,
+    max_hours=1,
+)
 ```
 
-On CUDA, active games fill `max_batch`. On Metal, games use up to one fewer
-than the available cores, with at least one game. Pending matches and remaining
-host memory bound both counts. Each shared forward handles up to `max_batch`
-rows and records its batch composition in `artifacts/agents/batches.json`.
-Larger game requests use multiple forwards and receive one ordered reply.
+Etude schedules the matches, caches checkpoints and stores each outcome as
+the generator yields it.
 
-Without a matching accelerator, each game caches its own forwards, uses one
-model-library thread, and gets a share of the checkpoint allowance (half of
-host memory by default). The startup line explains direct inference, including
-when `CUDA_VISIBLE_DEVICES` hides a GPU. Declare `("cpu",)` when your loader
-uses CPU so Etude skips the probe. Etude drops `"cpu"` from mixed declarations.
-
-Choose tensor placement inside `load`, honor Etude's thread environment, and
-keep model-library imports in the loading module so shared games stay light.
-`devices`, `memory_gb`, `max_batch`, and `max_delay_seconds` require a loader.
-The two batching settings also require a declared accelerator.
+- `matches.target_matches` suggests how many matches this process should hold
+  at once, from its initial share of the tournament, capped at `max_batch`
+  when a loader is declared. Size an engine with several games per match
+  accordingly.
+  Call `await matches.take(n)` with the number of free slots to get up to `n`
+  pending `(match, agents)` pairs. In both play modes, processes take their first
+  matches after loading and setting up the game code. Etude shares pending
+  matches among empty processes and accounts for held matches when refilling.
+  An empty grant for `n > 0` means the tournament has no pending matches or
+  the run is stopping.
+- `await forward(inputs, rows=...)` defaults `rows` to `len(inputs)`. Pass
+  `rows=` for a pre-collated batch so the agent process never merges calls past
+  `max_batch` rows and reports real row counts. A single pre-collated call
+  above `max_batch` rows runs alone. An engine can choose smaller batches
+  when its model needs a hard limit. Group ready rows by their shared `Forward`
+  object to batch calls for the same checkpoint. When Etude merges requests,
+  the `ModelForward` returned by `load` can receive several pre-collated inputs
+  in one list. Return one output per input, in the same order.
+- Grouped `play` and `play_many` tournaments using the same `Agents(load=...)`
+  share one agent process in shared inference, so their input elements must be
+  compatible with the same `ModelForward`.
+- Yield `(match, tables)` or `(match, Result(...))` with the match from `take` or
+  a copy whose key identifies exactly one held match. Yield as each slot
+  finishes so it can backfill without waiting for stragglers.
+- Yield `(match, error)` for an ordinary game error and the remaining slots
+  can keep stepping and take pending matches. An uncaught exception, an invalid match in a yield,
+  or returning with held or pending matches fails the generator and its
+  held matches. A transient infrastructure failure such as
+  `RetryRequested` interrupts the group and retains unfinished matches for retry.
 
 ## Results and retry
 
-Return `Tables`, a mapping of table names to rows. Use plain identifier names
-for tables/columns. A row may name `seat` (zero-based player position), `game`
-(if your domain has subgames), or `group` for a team result. Group `all` contains
-every seat. Etude adds `run` and `match`; every successful match must return rows.
+Return `Tables`, a mapping of table names to rows (or `Result(tables=...,
+blobs=..., execution=...)` from `etude.eval.result` when keeping blobs or
+execution provenance). Use plain identifier names for tables/columns. A row may
+name `seat` (zero-based player position), `game` (if your domain has subgames),
+or `group` for a team result. Group `all` contains every seat. Etude adds `run`
+and `match`; every successful match must return rows.
 
 ```python
 return {"scores": [{"seat": 0, "won": True}, {"seat": 1, "won": False}]}
 ```
 
 A successful match is reused across an experiment's tournaments in the same
-environment. Errors retain completed results; infrastructure failures retry,
-ordinary game failures require `--retry-failed`. Catching a forward error in play
-does not hide it from Etude's failure retention. Unrelated matches can complete.
-[Limits](limits.md) covers process and API side effects.
+environment. An ordinary `play` error fails its match and other matches keep
+playing. A refused table or an invalid outcome type in either play mode fails
+its match and stops grants for the tournament while held matches finish.
+Errors importing or setting up authored game code fail its tournament while
+sibling tournaments continue. A loader import error fails its tournament in
+direct mode and the group in shared mode. Completed results are retained,
+and matches that were never granted remain pending. Etude reports
+`eval_startup_failed` for setup errors before the match stream starts.
+A stream error with no match failure to record reports `eval_stream_failed`.
+Infrastructure failures retry, and ordinary failed matches require
+`--retry-failed`. A forward failure raises
+`ForwardError` (with `.checkpoint` naming the checkpoint key) at the awaiting
+call. In shared inference, a game process sends each checkpoint's calls from
+one event-loop turn as one request, so a serialization error in one input or
+output raises a non-retryable `ForwardError` at every call in that request.
+Other checkpoints, other turns and other processes continue. A lost connection interrupts the
+group and leaves unfinished matches eligible for retry.
+Etude records a failed match even when `play` catches `ForwardError`.
+In `play_many`, catch `ForwardError`, drop affected slots and yield `(match,
+error)` while unrelated matches complete. A checkpoint load failure applies
+to unfinished matches seating
+that checkpoint, including matches that yield fallback tables.
+[Limits](limits.md) covers process, event-loop and API side effects.
 
 ## Querying
 
@@ -223,6 +343,7 @@ of large raw tables. [Tracking](tracking.md#reports) covers report declarations;
 
 For explicit match lists outside declarations, open
 `evaluating(environment, experiment=..., matches=matches)` and call
-`run.play(play, agents=Agents(...))` under `if __name__ == "__main__":`.
-Games run in fresh spawned processes; play, load, build and wrapper records must
+`run.play(play, agents=Agents(...))` or `run.play_many(play_many,
+agents=Agents(...))` under `if __name__ == "__main__":`. Games run in fresh
+spawned processes; `play`, `play_many`, `load`, `build` and wrapper records must
 be importable module-level definitions.

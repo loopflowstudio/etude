@@ -28,7 +28,6 @@ class LoaderDeclaration[F](Record):
     build: F | None = None
     devices: _Devices = _DEFAULT_DEVICES
     max_batch: int = Field(default=32, ge=1)
-    max_delay_seconds: float = Field(default=0.005, ge=0, allow_inf_nan=False)
     memory_gb: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
 

@@ -273,7 +273,10 @@ pool imports their defining module and cannot inherit a parent closure.
 Eval vocabulary: `load(checkpoint)` returns a deterministic callable from a list
 of inputs to a list of outputs. `Agents` declares it and an optional game-side
 `build(player, leaves)`, whose return value belongs to the author and is never
-called by Etude. Sampling belongs in game code, seeded from `match.seed`. Player
+called by Etude. Games await `Forward`; pre-collated inputs declare their row
+count. `play` is an async match function. `play_many` is an async generator
+that takes matches for free slots and yields each outcome with its match object.
+Sampling belongs in game code, seeded from `match.seed`. Player
 wrappers are frozen author records; checkpoint leaves share loading and batches.
 The shared agent process or each direct game process holds checkpoint forwards;
 game processes build wrappers and play; say neither "server", "worker" nor "policy"
@@ -286,12 +289,19 @@ their library; each game process keeps one thread.
 `("cuda", "metal")`). Derive shared or direct inference from that declaration
 and detected hardware, without a separate topology switch. Probe without
 importing the loader or its framework. The loader owns placement and GPU memory.
-Shared CUDA fills the declared batch. Shared Metal on native arm64 macOS uses
-`max(1, cpus - 1)` games. Pending matches and remaining host memory bound both.
-Cap each shared forward at `max_batch`. An absent or undeclared accelerator plays
-direct. Skip the probe for CPU-only loaders and plays without a loader or
-checkpoints. For checkpoint inference, `play_together` logs mode, reason and
-sizing in one startup line.
+Shared inference leaves a core for the agent process when possible. Pending
+matches and remaining host memory bound the process count. With `play`, shared
+inference divides `max_batch` by the process count, direct checkpoint inference
+gives each process up to `max_batch` matches, and code-only games use one match
+per process. Budget inference threads and checkpoint memory using the
+number of processes started. `play_many` requests work for its free slots.
+Empty processes share pending matches. Refills account for held matches and
+grant at least one while work remains.
+Cap merged shared forwards at `max_batch`. Split oversized requests with one
+input per row and preserve their reply order. Opaque oversized inputs run
+alone. An absent or undeclared accelerator plays direct. Skip the probe for
+CPU-only loaders and plays without a loader or checkpoints. Log the mode,
+reason and sizing in one startup line.
 
 Launcher vocabulary: Machine owns acquisition and provider facts; Rental owns
 only a paid window, keyed by its machine; RunAttempt is the allocation on any

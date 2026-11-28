@@ -1,201 +1,174 @@
-"""The agent process's batching loop and durable batch observations.
+"""The agent process's zero-delay batching loop and durable batch observations.
 
-`_Batches` owns pending inputs; Forwards owns loading and byte-based eviction. `_run_agents`
-imports the authored loader and records batches as frozen Pydantic records;
-game processes never import this module.
+`_Batches` owns pending requests; `Forwards` owns loading and byte-based eviction.
+`_run_agents` imports the authored loader and records batches as frozen Pydantic
+records; game processes never import this module.
 """
 
 from __future__ import annotations
 
 import selectors
+import signal
 import socket
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
-from multiprocessing.reduction import ForkingPickler
 from pathlib import Path
-from typing import cast
+from types import FrameType
+from typing import NoReturn, cast
 
 from etude.call import Function
 from etude.errors import RetryRequested, explain
-from etude.eval.agents import AgentFailure, Answer, Request
+from etude.eval.agents import (
+    Answer,
+    CheckpointRequest,
+    ForwardError,
+    ForwardResult,
+    decode_requests,
+    encode_answer,
+    recv_frame,
+    send_frame,
+)
 from etude.eval.forwards import Forwards
 from etude.records import Record
 
 
-class BatchInput(Record):
-    player: str
-    tournament: str
-    match: str
-
-
 class Batch(Record):
     checkpoint: str
-    inputs: tuple[BatchInput, ...]
-    forward_seconds: float
+    rows: int
+    requests: int
+    queue_wait_seconds: float
+    receive_seconds: float
     load_seconds: float
+    forward_seconds: float
+    encode_seconds: float
+    send_seconds: float
     forward_calls: int
     loads: int
-    transport_seconds: float
 
 
 @dataclass
 class _Pending:
-    connection: Connection
-    request: Request
-    since: float
+    peer: socket.socket
+    request: CheckpointRequest
     receive_seconds: float
 
 
-def _responses(answer: Answer, batch: list[_Pending]) -> list[memoryview]:
-    responses: list[memoryview] = []
+def _responses(
+    key: str, result: ForwardResult, batch: list[_Pending]
+) -> list[tuple[bytes, memoryview]]:
+    responses: list[tuple[bytes, memoryview]] = []
     offset = 0
     for item in batch:
-        size = len(item.request.inputs)
-        responses.append(
-            ForkingPickler.dumps(
-                Answer(answer.outputs[offset : offset + size], answer.error, answer.retry)
-            )
-        )
-        offset += size
+        stop = offset + len(item.request.inputs)
+        part = result if isinstance(result, ForwardError) else result[offset:stop]
+        responses.append(encode_answer(Answer(item.request.id, key, part)))
+        offset = stop
     return responses
 
 
 class _Batches:
-    """Single-thread ownership of loaded agents and queued requests."""
+    """Single-thread ownership of loaded agents and queued per-checkpoint requests."""
 
     def __init__(
         self,
         load: Callable[..., object],
         max_batch: int,
-        max_delay: float,
         memory: int,
     ) -> None:
-        self.forwards = Forwards(load, memory)
+        self.forwards = Forwards(load, memory, max_batch)
         self.max_batch = max_batch
-        self.max_delay = max_delay
         self.pending: dict[str, list[_Pending]] = {}
         self.batches = 0
-        self.inputs = 0
+        self.rows = 0
 
     @property
     def loads(self) -> int:
         return self.forwards.loads
 
     def add(
-        self, connection: Connection, request: Request, now: float, receive_seconds: float = 0.0
+        self,
+        peer: socket.socket,
+        requests: Sequence[CheckpointRequest],
+        receive_seconds: float = 0.0,
     ) -> None:
-        self.pending.setdefault(request.checkpoint.key, []).append(
-            _Pending(connection, request, now, receive_seconds)
-        )
+        for request in requests:
+            pending = _Pending(peer, request, receive_seconds / len(requests))
+            self.pending.setdefault(request.checkpoint.key, []).append(pending)
 
-    def delay(self, now: float) -> float | None:
-        if not self.pending:
-            return None
-        return max(0, min(items[0].since + self.max_delay for items in self.pending.values()) - now)
-
-    def _forward(self, batch: list[_Pending]) -> tuple[Answer, list[Batch]]:
-        """Cap forwards even when one game requests more than a batch of rows."""
+    def _forward(
+        self, key: str, batch: list[_Pending], rows: int
+    ) -> tuple[ForwardResult, list[Batch]]:
         checkpoint = batch[0].request.checkpoint
         inputs = [item for pending in batch for item in pending.request.inputs]
-        origins = tuple(
-            BatchInput(
-                player=p.request.player, tournament=p.request.tournament, match=p.request.match
-            )
-            for p in batch
-            for _ in p.request.inputs
-        )
-        outputs: list[object] = []
+        answer = self.forwards.answer(checkpoint, inputs, self.pending.keys(), rows=rows)
         observations: list[Batch] = []
-        for start in range(0, len(inputs), self.max_batch):
-            stop = start + self.max_batch
-            before_calls, before_loads = self.forwards.calls, self.forwards.loads
-            before_forward, before_load = self.forwards.forward_seconds, self.forwards.load_seconds
-            answer = self.forwards.answer(checkpoint, inputs[start:stop], self.pending.keys())
-            loads = self.forwards.loads - before_loads
-            if loads:
-                print(f"etude: agents: loaded {checkpoint.key}", file=sys.stderr, flush=True)
+        for index, forwarded in enumerate(answer.batches):
+            if forwarded.loads:
+                print(f"etude: agents: loaded {key}", file=sys.stderr, flush=True)
             observations.append(
                 Batch(
-                    checkpoint=checkpoint.key,
-                    inputs=origins[start:stop],
-                    forward_seconds=self.forwards.forward_seconds - before_forward,
-                    load_seconds=self.forwards.load_seconds - before_load,
-                    forward_calls=self.forwards.calls - before_calls,
-                    loads=loads,
-                    transport_seconds=0,
+                    checkpoint=key,
+                    rows=forwarded.rows,
+                    requests=len(batch) if index == 0 else 0,
+                    queue_wait_seconds=0.0,
+                    receive_seconds=0.0,
+                    load_seconds=forwarded.load_seconds,
+                    forward_seconds=forwarded.forward_seconds,
+                    encode_seconds=0.0,
+                    send_seconds=0.0,
+                    forward_calls=forwarded.calls,
+                    loads=forwarded.loads,
                 )
             )
-            if answer.error is not None:
-                return answer, observations
-            outputs.extend(answer.outputs)
-        return Answer(outputs), observations
+        return answer.result, observations
 
-    def flush(self, now: float, control: Connection | None = None) -> list[Batch]:
+    def flush(self, queue_wait_seconds: float = 0.0) -> list[Batch]:
+        """Flush ready requests by checkpoint, batching up to `max_batch` rows."""
         observations: list[Batch] = []
+        remaining_wait = queue_wait_seconds
         for key, items in list(self.pending.items()):
-            if (
-                sum(len(p.request.inputs) for p in items) < self.max_batch
-                and now < items[0].since + self.max_delay
-            ):
-                continue
             batch: list[_Pending] = []
-            count = 0
+            rows = 0
             for item in items:
-                size = len(item.request.inputs)
-                if batch and count + size > self.max_batch:
+                if batch and rows + item.request.rows > self.max_batch:
                     break
                 batch.append(item)
-                count += size
+                rows += item.request.rows
             del items[: len(batch)]
             if not items:
                 del self.pending[key]
-            answer, forwarded = self._forward(batch)
-            # Serialize every reply before delivery: an unpicklable answer fails
-            # the whole batch, while successful payloads are encoded only once.
+            answer, forwarded = self._forward(key, batch, rows)
             started = time.monotonic()
-            try:
-                responses = _responses(answer, batch)
-            except Exception as error:
-                answer = Answer(
-                    [], f"agent {key}: {explain(error)}", isinstance(error, RetryRequested)
-                )
-                responses = _responses(answer, batch)
-            transport_seconds = time.monotonic() - started + sum(p.receive_seconds for p in batch)
-            if answer.error is not None and control is not None:
-                control.send(
-                    [
-                        AgentFailure(
-                            checkpoint=key,
-                            tournament=p.request.tournament,
-                            match=p.request.match,
-                            error=answer.error,
-                            retry=answer.retry,
-                            loading=key in self.forwards.failed,
-                        )
-                        for p in batch
-                    ]
-                )
-                # Only failure metadata crosses the control pipe; inputs stay direct.
-                control.recv()
+            responses = _responses(key, answer, batch)
+            encode_seconds = time.monotonic() - started
+            receive_seconds = sum(p.receive_seconds for p in batch)
             started = time.monotonic()
             for item, response in zip(batch, responses, strict=True):
                 try:
-                    item.connection.send_bytes(response)
+                    send_frame(item.peer, *response)
                 except (OSError, EOFError):
                     pass  # The game may have been cancelled at its deadline.
-            transport_seconds += time.monotonic() - started
-            if forwarded:
-                # One transport exchange covers all slices of an oversized request.
-                forwarded[0] = forwarded[0].model_copy(
-                    update={"transport_seconds": transport_seconds}
-                )
-            self.inputs += sum(len(each.inputs) for each in forwarded)
+            send_seconds = time.monotonic() - started
+            forwarded[0] = forwarded[0].model_copy(
+                update={
+                    "queue_wait_seconds": remaining_wait,
+                    "receive_seconds": receive_seconds,
+                    "encode_seconds": encode_seconds,
+                    "send_seconds": send_seconds,
+                }
+            )
+            self.rows += sum(batch.rows for batch in forwarded)
             self.batches += len(forwarded)
             observations.extend(forwarded)
+            remaining_wait = 0.0
         return observations
+
+
+def _terminate(signum: int, frame: FrameType | None) -> NoReturn:
+    raise SystemExit(128 + signum)
 
 
 def _run_agents(
@@ -203,16 +176,27 @@ def _run_agents(
     load: Function,
     checkout: str | None,
     max_batch: int,
-    max_delay: float,
     memory: int,
     control: Connection,
     artifacts: str,
 ) -> None:
-    batches = _Batches(load.load(checkout), max_batch, max_delay, memory)
-    peers: list[Connection] = []
+    try:
+        loader = load.load(checkout)
+    except Exception as error:
+        detail = explain(error)
+        control.send(
+            RetryRequested(detail) if isinstance(error, RetryRequested) else RuntimeError(detail)
+        )
+        return
+
+    batches = _Batches(loader, max_batch, memory)
+    peers: list[socket.socket] = []
     report = Path(artifacts, "batches.json").open("w")
     report.write("[")
+    report_end = report.tell()
+    wait_seconds = 0.0
     try:
+        signal.signal(signal.SIGTERM, _terminate)
         with (
             socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as listener,
             selectors.DefaultSelector() as selector,
@@ -223,38 +207,51 @@ def _run_agents(
             selector.register(control, selectors.EVENT_READ)
             control.send(None)
             while True:
-                for event, _ in selector.select(batches.delay(time.monotonic())):
+                wait_started = time.monotonic()
+                events = selector.select(0.0 if batches.pending else None)
+                wait_seconds += time.monotonic() - wait_started
+                for event, _ in events:
                     if event.fileobj is control:
                         return
                     if event.fileobj is listener:
                         peer, _ = listener.accept()
-                        connection = Connection(peer.detach())
-                        peers.append(connection)
-                        selector.register(connection, selectors.EVENT_READ)
+                        peers.append(peer)
+                        selector.register(peer, selectors.EVENT_READ)
                     else:
-                        connection = cast(Connection, event.fileobj)
+                        peer = cast(socket.socket, event.fileobj)
                         started = time.monotonic()
                         try:
-                            request = cast(Request, connection.recv())
+                            requests: list[CheckpointRequest] = []
+                            for request in decode_requests(recv_frame(peer)):
+                                if isinstance(request, Answer):
+                                    send_frame(peer, *encode_answer(request))
+                                else:
+                                    requests.append(request)
                         except (EOFError, OSError):
-                            selector.unregister(connection)
-                            connection.close()
-                            peers.remove(connection)
+                            selector.unregister(peer)
+                            peer.close()
+                            peers.remove(peer)
                         else:
-                            received = time.monotonic()
-                            batches.add(connection, request, received, received - started)
-                for batch in batches.flush(time.monotonic(), control):
-                    if report.tell() > 1:
-                        report.write(",")
-                    report.write(batch.model_dump_json())
-                report.flush()
+                            batches.add(peer, requests, time.monotonic() - started)
+                flushed = batches.flush(wait_seconds)
+                if flushed:
+                    wait_seconds = 0.0
+                    report.write(
+                        ("," if report_end > 1 else "")
+                        + ",".join(batch.model_dump_json() for batch in flushed)
+                    )
+                    report_end = report.tell()
     finally:
-        for connection in peers:
-            connection.close()
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        # A signal can interrupt an append. Close the array at its last complete flush.
+        report.seek(report_end)
         report.write("]")
+        report.truncate()
         report.close()
+        for peer in peers:
+            peer.close()
         print(
-            f"etude: agents: stopped; {batches.loads} checkpoints loaded, {batches.inputs} inputs in {batches.batches} batches",
+            f"etude: agents: stopped; {batches.loads} checkpoints loaded, {batches.rows} rows in {batches.batches} batches",
             file=sys.stderr,
             flush=True,
         )

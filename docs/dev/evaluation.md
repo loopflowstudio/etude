@@ -10,12 +10,14 @@ provenance and tables remain readable without reinterpreting stored results.
 ## Eval runs
 
 `evaluating` opens one `EvalRun`. Pass a tournament, or an environment with
-an explicit match list; `run.play(play)` plays its unstored matches.
-Outside a launch, give `experiment=`. `run.should_stop` checks
-stop requests between matches; a planned stop seals completed tables and
-raises `Stopped`. Use the evaluating context and its play method; one-call adapters have been removed.
-Games play in fresh `multiprocessing` spawn processes, which import the calling
-script again: a script keeps `run.play` under `if __name__ == "__main__":`.
+an explicit match list; `run.play(play)` plays its unstored matches with an
+`async def play(match, agents)`, and `run.play_many(play_many)` drives a
+streaming async generator over `MatchStream`. Outside a launch, give `experiment=`.
+`run.should_stop` stops granting new matches; a planned stop seals completed
+tables and raises `Stopped`. Use the evaluating context and its play methods;
+one-call adapters have been removed. Games play in fresh `multiprocessing` spawn
+processes, which import the calling script again: a script keeps `run.play` and
+`run.play_many` under `if __name__ == "__main__":`.
 
 <!-- implementation-reference -->
 ```python
@@ -123,18 +125,39 @@ with evaluating(
   them as played.
 - **Match config.** Your Pydantic model, such as `Deal`, describes one
   match's settings. `Seating(configs=(Deal(deal=7), ...))` makes a match for
-  each config. Annotate `play(match: Match[Deal], agents: list[object])` to receive that type,
+  each config. Annotate `async def play(match: Match[Deal], agents: Sequence[object])`
+  or `async def play_many(matches: MatchStream[Deal])` to receive that type,
   including in worker processes. Etude defines no match config base class.
   The JSON values identify the match; the Python class name does not. Stored
-  Stored `conditions` fields still decode; the old Python property is removed.
+  `conditions` fields still decode; the old Python property is removed.
 - **Matches.** Players in their seats under fixed `config`, played for
   `games`: the unit Etude schedules, resumes and resamples. A tournament's
   `Seating` makes one match per config. Seat swaps belong
   inside `play`. Group `all` holds every seat; a player may sit in two seats.
-- **Game processes.** Matches are played in fresh processes, as many at once
-  as the run has CPUs, by affinity and container quota, and never more than
-  there are matches. `evaluating` has no setting for the number; a job that
-  declares [agents](../evaluation.md#agents) has it sized for them too.
+- **Game processes.** Each game process runs one `asyncio` event loop consuming
+  one tournament stream (Etude's task driver for `async def play`, or the
+  author's `play_many` async generator); a grouped run with differing play
+  functions or rule types binds each game process to one tournament while
+  sharing one GPU agent process. Process count is bounded by pending matches,
+  CPUs (leaving one core for the shared agent process when present) and memory.
+  For `play`, shared inference allows up to `ceil(max_batch / processes)`
+  matches per process, and direct checkpoint inference allows up to
+  `max_batch` per process. Code-only `play` uses one match at a time per
+  process and bypasses the shared agent.
+  Pending forwards flush on a zero-delay loop barrier.
+  The inference thread and checkpoint budgets use the count of processes
+  started for the panel. The startup line gives the initial `target_matches`
+  for each play mode. With a loader, `play_many` hints are capped at `max_batch`.
+  Both play modes request grants after loading and setting up the callback.
+  Grants share unfinished matches across processes, accounting for matches
+  already held and pending work for empty processes. A positive request
+  receives at least one while grants are
+  open and work remains. Per-process diagnostics are written to
+  `game-{pid}.json`, and shared agent runs record batch row counts and stage
+  timings in `batches.json`. The agent closes the batch array on SIGTERM.
+  Game reports count outcomes sent to the parent in `matches`, including
+  failed and refused outcomes. Direct game reports count rows in `local_rows`.
+  `evaluating` has no setting for process count.
 - **Order.** Matches start in the order `etude.eval.schedule.ordered` gives,
   so consecutive matches reuse the checkpoints kept loaded: first those
   loading the fewest checkpoints not yet used, then those reusing the most
@@ -145,7 +168,7 @@ with evaluating(
   numbers, text, booleans or nulls. A game's own seat numbering, when it
   differs from the match's, goes in `game_seat`.
 - **Blobs.** Bytes a match keeps beside its rows, such as a game's replay
-  evidence: return `Result(tables=..., blobs=[...])` (`etude.eval.match`)
+  evidence: return `Result(tables=..., blobs=[...])` (`etude.eval.result`)
   and name each blob in a row by `hashlib.sha256(blob).hexdigest()`.
   `read_blobs(db, store, digests)` gives them back, verified.
 - **Rollups.** A summary you will query often is declared once and summed
@@ -195,16 +218,27 @@ with evaluating(
   `seat` and `group`, a seat or group the match lacks, a column named
   `player`, or a column whose type changes during a run is refused. A refused
   or raising match is recorded as failed with its error, nothing else of it
-  is stored. The run stops starting matches, retains in-flight outcomes and
-  ends failed. When a match cannot be played, let `play` raise: an error
-  caught and returned as empty tables is
-  still refused (`match_has_no_rows`), never stored as a result.
+  is stored. A raised `play` error fails that match alone. A refused table or
+  invalid outcome type fails its match, stops new grants for the tournament,
+  and lets held matches finish. In `play_many`, yield
+  `(match, error)` to fail one slot and keep taking pending matches. A raised
+  error or an unknown or duplicate yield fails every held match. Returning with
+  held matches unyielded fails each unyielded match. Errors importing or
+  setting up authored game code fail that tournament and leave ungranted
+  matches pending. A loader import error fails its tournament in direct mode
+  and the group in shared mode. These setup errors use `eval_startup_failed`.
+  Stream errors with no match failure to record use `eval_stream_failed`.
+  A game process that exits without reporting, a failed shared-agent
+  connection or `RetryRequested` interrupts the group and leaves unfinished
+  matches eligible for retry.
+  A run with failed matches ends failed.
 - **Environments are never pooled.** An eval run has one environment;
   resuming with another is refused, and a report shows each drawn value from the
   environment whose latest match is newest, noting only overlaps on values
   reachable panels draw.
 - **Resume.** Outside a launch, reopen the same eval run with
-  `evaluating(..., resume=True)` and call `run.play(play)` to carry on.
+  `evaluating(..., resume=True)` and call `run.play(play)` or
+  `run.play_many(play_many)` to carry on.
   A launched retry resumes automatically. Matches already delivered to any
   of `storages` are skipped, even on a machine with an empty disk.
 - **Progress.** Each stored match prints one line to stderr:
@@ -393,6 +427,36 @@ with evaluating(
   draws it. Checkpoints no training run under the
   source recorded make one `Scores` per seating,
   ordered by name, numbers in order (`updates-900` before `updates-1000`).
+
+## Measuring CUDA evaluation
+
+Read `game-*.json` for outcomes sent by each game process and `batches.json` for
+rows per forward and time spent waiting for requests.
+`max_batch` defaults to 32 rows and bounds how much the agent process merges.
+An oversized pre-collated request runs alone.
+
+Before fair-share grants, Manabot played the same 128-game float32 panel on
+one RTX 4090 through Etude's synchronous API and through `play_many` with
+64 slots per process.
+All 128 traces per checkpoint matched across the two callbacks. Two of the
+12 streaming processes played matches. The socket arm spent 30–38 seconds
+waiting for requests and 11–12 seconds in forwards.
+
+| Checkpoint | Sync games/hour | Streaming games/hour | Sync GPU busy | Streaming GPU busy |
+| --- | ---: | ---: | ---: | ---: |
+| Trained `w160l8` | 11,686 | 8,017 | 20.1% | 13.3% |
+| Seeded `w384l8` | 11,506 | 9,488 | 23.6% | 17.4% |
+
+Sync used Manabot `966e8ff296` and streaming used `fb1580b472`. These figures
+capture the combined changes to game stepping and Etude serving on one host.
+
+With `w384l8`, cutting the engine to 16 slots gave eight processes matches
+and raised streaming throughput to 17,995 games/hour at 33.1% GPU busy.
+Mean rows per forward fell from 8.25 to 6.37 as time waiting for requests
+fell from 30.3 to 5.6 seconds. The 64-slot arm also ran with `max_batch=64`
+and delivered 9,441 games/hour at the same mean rows per forward. Capping
+that 64-slot callback at four processes with `max_batch=32` delivered
+9,403 games/hour. Two processes received matches in both runs.
 
 ## Querying
 

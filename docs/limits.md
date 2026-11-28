@@ -21,17 +21,20 @@ failure recovery requires.
 - Code and environment source versions are provenance. Change identifying
   config or names when new behavior should be a new scientific condition.
   Keep published checkpoint contents fixed under their keys.
-- Game functions and wrapper records must be importable top-level definitions.
-  Games run in spawned processes. Checkpoint inference batches through a shared
-  agent process when the loader declares the detected accelerator (`cuda` or
-  `metal`). Apple detection uses native arm64 macOS. Declare `devices=("cpu",)`
-  for a CPU-only loader or a Mac without usable Metal. Direct games use one
-  model-library thread each. Your loader owns device selection and must honor
-  the thread environment. The batch and memory allowances describe process
-  capacity. The model library owns GPU memory residency.
-- A match must return rows to count as done. Caught forward failures still
-  propagate to retention. Ordinary game failures need `--retry-failed`;
-  transient infrastructure failures can retry automatically.
+- Game functions (`play`, `play_many`), loaders, build hooks and wrapper records
+  must be importable top-level definitions. Games run in spawned processes.
+  Multiple `async def play` matches share one `asyncio` event loop per game
+  process; blocking the loop without awaiting stalls the other games in that
+  process until the run deadline. Shared inference uses a declared, detected
+  accelerator (`cuda` or `metal` on native arm64 macOS). A CPU-only loader
+  can declare `devices=("cpu",)` to skip the probe. Direct game processes use
+  one model-library thread each. Your loader must honor the thread environment
+  and owns device selection and GPU memory residency. A game-process crash
+  makes held matches retryable while already-sealed matches survive.
+- A match must return rows to count as done. In `play`, caught `ForwardError`s
+  still fail the match; in `play_many`, yield `(match, error)` for failed slots
+  or let the error escape to fail held matches. Ordinary game failures need
+  `--retry-failed`; transient infrastructure failures can retry automatically.
 - Logs, status and `etude view` show retained evidence, not live remote probes.
   Reads show freshness. Only explicit waits collect remote facts; expiry of a
   wait does not prove remote work was cancelled.

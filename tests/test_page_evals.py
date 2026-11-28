@@ -398,9 +398,9 @@ def duel(first: Player, second: Player, deal: int = 0) -> Match:
     return Match(players=(first, second), config={"deal": deal}, games=2)
 
 
-def recorded_execution(match: Match, agents: list[object]) -> Result:
+async def recorded_execution(match: Match, agents: list[object]) -> Result:
     return Result(
-        tables=play(match, agents),
+        tables=await play(match, agents),
         execution={
             "device": os.environ["ETUDE_TEST_DEVICE"],
             "compute": os.environ["ETUDE_TEST_COMPUTE"],
