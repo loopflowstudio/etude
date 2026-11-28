@@ -291,10 +291,11 @@ and detected hardware, without a separate topology switch. Probe without
 importing the loader or its framework. The loader owns placement and GPU memory.
 Shared inference leaves a core for the agent process when possible. Pending
 matches and remaining host memory bound the process count. With `play`, checkpoint
-inference divides `max_batch` across processes and code-only games use one match
-per process. `play_many` requests work for its free slots. Etude caps each
-grant at the pending matches divided by the tournament's active processes,
-rounded up.
+inference divides `max_batch` by the process limit and code-only games use one
+match per process. Budget inference threads and checkpoint memory using the
+number of processes started. `play_many` requests work for its free slots.
+Empty processes share pending matches. Refills account for held matches and
+grant at least one while work remains.
 Cap merged shared forwards at `max_batch`. Split oversized requests with one
 input per row and preserve their reply order. Opaque oversized inputs run
 alone. An absent or undeclared accelerator plays direct. Skip the probe for

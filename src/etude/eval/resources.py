@@ -160,13 +160,21 @@ class ExecutionPlan:
 
     processes: int
     games: int
-    threads: int
     inference: Inference
-    checkpoint_bytes: int
+    cpus: int
+    checkpoint_memory: int
 
     @property
     def shared(self) -> bool:
         return self.inference in ("cuda", "metal")
+
+    @property
+    def threads(self) -> int:
+        return max(1, self.cpus - self.processes) if self.shared else 1
+
+    @property
+    def checkpoint_bytes(self) -> int:
+        return self.checkpoint_memory if self.shared else self.checkpoint_memory // self.processes
 
 
 def _select_inference(loader: "AgentLoader", checkpoints: bool) -> Inference:
@@ -213,8 +221,8 @@ def plan_execution(
         inference=inference,
         processes=processes,
         games=math.ceil(loader.max_batch / processes) if loading else 1,
-        threads=max(1, cpus - processes) if shared else 1,
-        checkpoint_bytes=held if shared else held // processes,
+        cpus=cpus,
+        checkpoint_memory=held,
     )
 
 

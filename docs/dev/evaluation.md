@@ -141,13 +141,15 @@ with evaluating(
   sharing one GPU agent process. Process count is bounded by pending matches,
   CPUs (leaving one core for the shared agent process when present) and memory.
   For `play` with checkpoint inference, each process keeps up to
-  `ceil(max_batch / processes)` matches in flight. Code-only `play` uses one
+  `ceil(max_batch / process_limit)` matches in flight. Code-only `play` uses one
   match per process. Pending forwards flush on a zero-delay loop barrier.
-  For `play_many`, each `matches.take(n)` grant is capped at
-  `ceil(pending / processes)` for the tournament. The parent counts processes
-  that have started and still have an open stream. Per-process
+  The inference thread and checkpoint budgets use the count of processes
+  started for the panel. For `play_many`, empty processes share the pending
+  matches. A process that holds matches can top up to its share of pending
+  matches and receives at least one while work remains. Per-process
   diagnostics are written to `game-{pid}.json`, and shared agent runs record
-  batch row counts and stage timings in `batches.json`. `evaluating` has no
+  batch row counts and stage timings in `batches.json`. Direct game reports
+  count rows in `local_rows`. `evaluating` has no
   setting for process count.
 - **Order.** Matches start in the order `etude.eval.schedule.ordered` gives,
   so consecutive matches reuse the checkpoints kept loaded: first those
@@ -209,8 +211,8 @@ with evaluating(
   `seat` and `group`, a seat or group the match lacks, a column named
   `player`, or a column whose type changes during a run is refused. A refused
   or raising match is recorded as failed with its error, nothing else of it
-  is stored. A raised `play` error or refused table stops new grants for the
-  tournament. In-flight outcomes are retained. In `play_many`, yield
+  is stored. A raised `play` error fails that match alone; a refused table
+  stops new grants for the tournament. In-flight outcomes are retained. In `play_many`, yield
   `(match, error)` to fail one slot and keep taking pending matches. A raised
   error or an unknown or duplicate yield fails every held match. Returning with
   held matches unyielded fails each unyielded match. A run with failed matches

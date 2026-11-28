@@ -18,10 +18,10 @@ import subprocess
 import sys
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from multiprocessing.connection import Connection, wait
 from pathlib import Path
@@ -534,9 +534,12 @@ class Playing:
         self.pending = deque(m for m in self.run.matches if m.key not in self.run.done)
         self.skipped = len(self.run.matches) - len(self.pending)
 
-    def grant(self, count: int, *, processes: int = 1) -> tuple[Match, ...]:
-        """Reserve up to one process's share of the remaining matches."""
-        count = min(count, math.ceil(len(self.pending) / processes))
+    def grant(
+        self, count: int, *, processes: int = 1, unfed: int = 1, held: int = 0
+    ) -> tuple[Match, ...]:
+        """Reserve pending matches while giving empty processes first claim on a fair share."""
+        share = math.ceil(len(self.pending) / (processes if held else unfed))
+        count = min(count, max(1, share - held))
         granted: list[Match] = []
         while self.pending and len(granted) < count:
             match = self.pending.popleft()
@@ -544,9 +547,12 @@ class Playing:
                 granted.append(match)
         return tuple(granted)
 
-    def _remember_failure(self, error: EtudeError | RetryRequested) -> None:
+    def _remember_failure(
+        self, error: EtudeError | RetryRequested, *, terminal: bool = False
+    ) -> None:
         if self.failure is None or (
-            isinstance(error, RetryRequested) and not isinstance(self.failure, RetryRequested)
+            not isinstance(self.failure, RetryRequested)
+            and (terminal or isinstance(error, RetryRequested))
         ):
             self.failure = error
 
@@ -563,33 +569,40 @@ class Playing:
             )
         ]
         if affected:
-            self.failure = self.run._record_failure(affected, error)
+            self._remember_failure(self.run._record_failure(affected, error))
             self.pending = deque(
                 match for match in self.pending if match.key not in self.run._failed
             )
 
-    def fail_matches(self, matches: Sequence[Match], error: BaseException) -> None:
-        if not self.streaming:
-            # A retry raised by per-match play interrupts the whole pass.
-            if isinstance(error, RetryRequested):
-                raise error
-            if isinstance(error, ForwardError) and error.retry:
-                raise RetryRequested(str(error)) from error
+    def fail_matches(
+        self, matches: Sequence[Match], error: BaseException, *, terminal: bool = False
+    ) -> None:
+        if isinstance(error, RetryRequested):
+            raise error
+        if isinstance(error, ForwardError) and error.retry and not error.loading:
+            raise RetryRequested(str(error)) from error
+        affected = [
+            match
+            for match in matches
+            if match.key not in self.run._failed and match.key not in self.run.done
+        ]
+        if affected or terminal:
+            self._remember_failure(self.run._record_failure(affected, error), terminal=terminal)
+        if terminal:
             self.pending.clear()
-        self._remember_failure(self.run._record_failure(matches, error))
 
     def accept(self, match: Match, outcome: Outcome, started: float) -> None:
-        if match.key in self.run._failed:
-            return
         if isinstance(outcome.result, BaseException):
             self.fail_matches((match,), outcome.result)
+            return
+        if match.key in self.run._failed:
             return
         try:
             self.run._store_played(match, outcome.result, outcome.seconds)
         except EtudeError as error:
             if error.code != "match_failed":
                 raise
-            self._remember_failure(error)
+            self._remember_failure(error, terminal=True)
             self.pending.clear()
             return
         self.played += 1
@@ -656,6 +669,11 @@ def _play_pending(plays: Sequence[Playing], resources: Resources, checkout: str 
     )
     matches = sum(len(each.pending) for each in plays)
     plan = plan_execution(matches, definition, checkpoints=has_checkpoints)
+    initial = _reserve_games(plays, plan, ())
+    if not initial:
+        return
+    # Per-match play can reserve the entire panel with fewer processes than the host allows.
+    plan = replace(plan, processes=len(initial))
     with (
         running_agents(definition, checkout, resources, plan) if plan.shared else nullcontext()
     ) as process:
@@ -663,12 +681,49 @@ def _play_pending(plays: Sequence[Playing], resources: Resources, checkout: str 
             plays,
             resources=resources,
             plan=plan,
+            initial=initial,
             checkout=checkout,
             agent_process=process,
             load=definition.load if has_checkpoints and not plan.shared else None,
         )
         if process is not None:
             process.check()
+
+
+@dataclass(frozen=True)
+class _GameGrant:
+    playing: Playing
+    matches: tuple[Match, ...]
+    target_slots: int
+
+
+def _reserve_games(
+    plays: Sequence[Playing], plan: ExecutionPlan, live: Sequence[_GameProcess]
+) -> list[_GameGrant]:
+    """Assign free process slots in tournament order, reserving play's first matches."""
+    capacity = plan.processes - len(live)
+    counts = Counter(id(child.playing) for child in live)
+    reserved: list[tuple[Playing, tuple[Match, ...]]] = []
+    while len(reserved) < capacity:
+        before = len(reserved)
+        for each in plays:
+            if not each.pending or each.streaming and counts[id(each)] >= len(each.pending):
+                continue
+            matches = () if each.streaming else each.grant(plan.games)
+            reserved.append((each, matches))
+            counts[id(each)] += 1
+            if len(reserved) == capacity:
+                break
+        if len(reserved) == before:
+            break
+    return [
+        _GameGrant(
+            each,
+            matches,
+            math.ceil(len(each.pending) / counts[id(each)]) if each.streaming else plan.games,
+        )
+        for each, matches in reserved
+    ]
 
 
 @dataclass
@@ -678,6 +733,7 @@ class _GameProcess:
     pipe: Connection
     held: dict[str, Match] = field(default_factory=dict)
     done: bool = False
+    exhausted: bool = False
 
     def finish(self, message: Done, *, stopping: bool) -> None:
         self.done = True
@@ -687,22 +743,14 @@ class _GameProcess:
         if error is None:
             if self.held:
                 error = RuntimeError("play_many returned without yielding its held matches")
-            elif each.streaming and not stopping and each.pending and not message.report.matches:
-                error = RuntimeError("play_many returned without taking pending matches")
+            elif each.streaming and not stopping and each.pending and not self.exhausted:
+                error = RuntimeError("play_many returned before taking all pending matches")
             else:
                 return
         matches = list(self.held.values())
         if not matches and not each.streaming and each.pending:
             matches.append(each.pending.popleft())
-        matches = [
-            match
-            for match in matches
-            if match.key not in each.run._failed and match.key not in each.run.done
-        ]
-        if matches or each.streaming:
-            # A broken stream stops grants even after releasing its last match.
-            each.pending.clear()
-            each.fail_matches(matches, error)
+        each.fail_matches(matches, error, terminal=True)
 
 
 def _play_matches(
@@ -710,11 +758,14 @@ def _play_matches(
     *,
     resources: Resources,
     plan: ExecutionPlan,
+    initial: Sequence[_GameGrant],
     checkout: str | None,
     agent_process: AgentProcess | None,
     load: Function | None,
 ) -> None:
     """Play tournament streams in spawned processes and retain outcomes on the invoking thread."""
+    if any(each.run.should_stop for each in plays):
+        raise Terminated("evaluation stopped before its execution deadline")
     started = time.monotonic()
     warned_imports = False
     failed_checkpoints: set[str] = set()
@@ -739,21 +790,22 @@ def _play_matches(
                 print(f"etude: {warning}; {GAME_IMPORT_FIX}", file=sys.stderr, flush=True)
                 warned_imports = True
 
-    stopping = any(each.run.should_stop for each in plays)
+    stopping = False
     context = multiprocessing.get_context("spawn")
     live: list[_GameProcess] = []
     address = agent_process.address if agent_process is not None else None
 
-    def spawn_one(each: Playing) -> _GameProcess:
+    def spawn_one(grant: _GameGrant) -> _GameProcess:
         parent, child_pipe = context.Pipe()
+        each = grant.playing
         # Starting play processes own their first matches even if another match fails
         # before they finish importing the game. Streaming engines request their own slots.
-        initial = () if each.streaming else each.grant(plan.games)
         game = Game(
             play=each.play,
             tournament=each.tournament,
-            concurrency=None if each.streaming else plan.games,
-            initial=initial,
+            streaming=each.streaming,
+            target_slots=grant.target_slots,
+            initial=grant.matches,
             agent_address=address,
             checkout=checkout,
             build=each.agent_loader.build,
@@ -762,50 +814,41 @@ def _play_matches(
             max_batch=each.agent_loader.max_batch,
         )
         process = context.Process(target=run_game_process, args=(child_pipe, resources, game))
-        process.start()
-        child_pipe.close()
+        try:
+            process.start()
+        except BaseException:
+            parent.close()
+            raise
+        finally:
+            child_pipe.close()
         return _GameProcess(
-            playing=each, process=process, pipe=parent, held={m.key: m for m in initial}
+            playing=each, process=process, pipe=parent, held={m.key: m for m in grant.matches}
         )
-
-    def spawn_ready() -> None:
-        nonlocal stopping
-        while len(live) < plan.processes and not stopping:
-            spawned = False
-            for each in plays:
-                if len(live) >= plan.processes:
-                    break
-                if not each.pending:
-                    continue
-                if each.streaming and sum(child.playing is each for child in live) >= len(
-                    each.pending
-                ):
-                    continue
-                if each.run.should_stop:
-                    stopping = True
-                    return
-                live.append(spawn_one(each))
-                spawned = True
-            if not spawned:
-                break
 
     def handle_message(child: _GameProcess, message: object) -> None:
         nonlocal stopping
         each = child.playing
         if isinstance(message, Take):
             stopping = stopping or each.run.should_stop
-            processes = (
-                sum(other.playing is each and not other.done for other in live)
-                if each.streaming
-                else 1
-            )
-            granted = () if stopping else each.grant(message.count, processes=processes)
+            granted: tuple[Match, ...]
+            if stopping:
+                granted = ()
+            elif each.streaming:
+                peers = [other for other in live if other.playing is each and not other.done]
+                granted = each.grant(
+                    message.count,
+                    processes=len(peers),
+                    unfed=sum(not other.held for other in peers),
+                    held=len(child.held),
+                )
+            else:
+                granted = each.grant(message.count)
+            child.exhausted = not granted
             child.held.update((match.key, match) for match in granted)
             child.pipe.send(granted)
         elif isinstance(message, Outcome):
             match = child.held.pop(message.match_key)
-            if isinstance(message.result, ForwardError) and message.result.loading:
-                fail_checkpoints((message.result,))
+            fail_checkpoints(message.loading_failures)
             each.accept(match, message, started)
         elif isinstance(message, Done):
             fail_checkpoints(message.loading_failures)
@@ -815,9 +858,9 @@ def _play_matches(
             raise TypeError(f"unexpected game message {type(message).__name__}")
 
     try:
-        spawn_ready()
-        if live:
-            _log_execution(plays, plan, len(live))
+        for grant in initial:
+            live.append(spawn_one(grant))
+        _log_execution(plays, plan)
         while live:
             left = seconds_left()
             allowance = (
@@ -861,7 +904,12 @@ def _play_matches(
                 live.remove(child)
                 if not child.done or exitcode != 0:
                     raise RetryRequested("game process exited before returning its match")
-            spawn_ready()
+            if len(live) < plan.processes and not stopping:
+                for grant in _reserve_games(plays, plan, live):
+                    if grant.playing.run.should_stop:
+                        stopping = True
+                        break
+                    live.append(spawn_one(grant))
     finally:
         for child in live:
             if child.process.is_alive():
@@ -874,8 +922,9 @@ def _play_matches(
         raise Terminated("evaluation stopped before its execution deadline")
 
 
-def _log_execution(plays: Sequence[Playing], plan: ExecutionPlan, processes: int) -> None:
+def _log_execution(plays: Sequence[Playing], plan: ExecutionPlan) -> None:
     streaming = any(each.streaming for each in plays)
+    processes = plan.processes
     process_count = f"{processes} game {'process' if processes == 1 else 'processes'}"
     game_count = f"{plan.games} {'game' if plan.games == 1 else 'games'} each"
     capacity = f"up to {game_count}"

@@ -11,7 +11,7 @@ import selectors
 import socket
 import sys
 import time
-from collections.abc import Callable, Sequence, Set
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
 from multiprocessing.reduction import ForkingPickler
@@ -73,7 +73,7 @@ class _Batches:
         max_batch: int,
         memory: int,
     ) -> None:
-        self.forwards = Forwards(load, memory)
+        self.forwards = Forwards(load, memory, max_batch)
         self.max_batch = max_batch
         self.pending: dict[str, list[_Pending]] = {}
         self.batches = 0
@@ -98,41 +98,27 @@ class _Batches:
     ) -> tuple[ForwardResult, list[Batch]]:
         checkpoint = batch[0].request.checkpoint
         inputs = [item for pending in batch for item in pending.request.inputs]
-        # Opaque pre-collated inputs have no Etude-owned row slicing operation.
-        size = self.max_batch if rows == len(inputs) else len(inputs)
-        outputs: list[object] = []
+        answer = self.forwards.answer(checkpoint, inputs, self.pending.keys(), rows=rows)
         observations: list[Batch] = []
-        for start in range(0, len(inputs), size):
-            chunk = inputs[start : start + size]
-            count = len(chunk) if rows == len(inputs) else rows
-            protected: Set[str] = self.pending.keys()
-            if start + size < len(inputs):
-                protected = protected | {key}
-            before_calls, before_loads = self.forwards.calls, self.forwards.loads
-            before_forward, before_load = self.forwards.forward_seconds, self.forwards.load_seconds
-            answer = self.forwards.answer(checkpoint, chunk, protected, rows=count)
-            loads = self.forwards.loads - before_loads
-            if loads:
+        for index, forwarded in enumerate(answer.batches):
+            if forwarded.loads:
                 print(f"etude: agents: loaded {key}", file=sys.stderr, flush=True)
             observations.append(
                 Batch(
                     checkpoint=key,
-                    rows=count,
-                    requests=len(batch) if start == 0 else 0,
+                    rows=forwarded.rows,
+                    requests=len(batch) if index == 0 else 0,
                     queue_wait_seconds=0.0,
                     receive_seconds=0.0,
-                    load_seconds=self.forwards.load_seconds - before_load,
-                    forward_seconds=self.forwards.forward_seconds - before_forward,
+                    load_seconds=forwarded.load_seconds,
+                    forward_seconds=forwarded.forward_seconds,
                     encode_seconds=0.0,
                     send_seconds=0.0,
-                    forward_calls=self.forwards.calls - before_calls,
-                    loads=loads,
+                    forward_calls=forwarded.calls,
+                    loads=forwarded.loads,
                 )
             )
-            if isinstance(answer, ForwardError):
-                return answer, observations
-            outputs.extend(answer)
-        return outputs, observations
+        return answer.result, observations
 
     def flush(self, queue_wait_seconds: float = 0.0) -> list[Batch]:
         """Flush ready requests by checkpoint, batching up to `max_batch` rows."""

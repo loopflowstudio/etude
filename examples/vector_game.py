@@ -1,6 +1,7 @@
 """Advance a small panel of variable-length games together."""
 
 from collections.abc import AsyncIterator
+from itertools import islice
 from typing import cast
 
 from etude.checkpoints import CheckpointRef
@@ -14,8 +15,10 @@ def load(saved: CheckpointRef) -> ModelForward:
     bias = int(saved.path.read_text())
 
     def forward(inputs: list[object]) -> list[object]:
-        # Each input is a pre-collated batch, with one output per input.
-        return [[turn + bias for turn in cast(tuple[int, ...], batch)] for batch in inputs]
+        # Run all ready rows together, then return one output batch per input.
+        batches = [cast(tuple[int, ...], batch) for batch in inputs]
+        scores = iter(turn + bias for batch in batches for turn in batch)
+        return [list(islice(scores, len(batch))) for batch in batches]
 
     return forward
 
@@ -23,7 +26,7 @@ def load(saved: CheckpointRef) -> ModelForward:
 async def play_many(matches: MatchStream) -> AsyncIterator[tuple[Match, Tables | Exception]]:
     slots: list[tuple[Match, Forward, int]] = []
     while True:
-        for match, agents in await matches.take(4 - len(slots)):
+        for match, agents in await matches.take(matches.target_slots - len(slots)):
             slots.append((match, cast(Forward, agents[0]), 1 + match.seed % 3))
         if not slots:
             return

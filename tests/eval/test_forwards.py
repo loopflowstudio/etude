@@ -45,7 +45,7 @@ def test_mirror_sends_all_branches_once_per_ply_and_builds_author_objects(
     else:
         [report] = [json.loads(path.read_text()) for path in artifacts.glob("game-*.json")]
         assert report["local_forward_calls"] == 2 * 2 * mirror.depth
-        assert report["local_inputs"] == 2 * 2 * mirror.depth * mirror.worlds * mirror.actions
+        assert report["local_rows"] == 2 * 2 * mirror.depth * mirror.worlds * mirror.actions
         assert report["local_loads"] == 1
         assert not (artifacts / "batches.json").exists()
 
